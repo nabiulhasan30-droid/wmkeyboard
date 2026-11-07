@@ -2924,9 +2924,17 @@ data class ClipEdit(
      * thing to save: it takes every tag off.
      */
     val tags: Boolean = false,
+    /**
+     * The editor is editing the clip's custom name/label rather than its text or tags.
+     */
+    val isLabel: Boolean = false,
 ) {
     /** Whether saving would change anything. Blank never saves a text. */
-    val canSave: Boolean get() = if (tags) draft.trim().trimEnd(',').trim() != original else draft.isNotBlank() && draft.trim() != original
+    val canSave: Boolean get() = when {
+        isLabel -> draft.trim() != original
+        tags -> draft.trim().trimEnd(',').trim() != original
+        else -> draft.isNotBlank() && draft.trim() != original
+    }
 
     companion object {
         /**

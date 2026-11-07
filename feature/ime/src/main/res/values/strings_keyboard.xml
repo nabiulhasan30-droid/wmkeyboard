@@ -970,6 +970,10 @@
     <string name="ime_clip_edit_title">Edit clip</string>
     <string name="ime_clip_edit_save">Save</string>
     <string name="ime_clip_edit_placeholder">Type the clip’s text</string>
+    <!-- A clip's custom name: the hold popup's action, and the editor opened on it. -->
+    <string name="ime_clip_name">Name</string>
+    <string name="ime_clip_name_title">Clip name</string>
+    <string name="ime_clip_name_placeholder">Enter a name for this clip</string>
     <!-- A clip's own labels (#612): the hold popup's action, and the editor opened on them. -->
     <string name="ime_clip_tags">Tags</string>
     <string name="ime_clip_tags_title">Tags</string>
@@ -1150,6 +1154,7 @@
         <item quantity="other">Hidden · %1$d characters</item>
     </plurals>
     <!-- Labels in the press-and-hold details popup for one clip. -->
+    <string name="ime_clip_info_name">Name</string>
     <string name="ime_clip_info_copied">Copied</string>
     <string name="ime_clip_info_edited">Edited</string>
     <string name="ime_clip_info_from">From</string>

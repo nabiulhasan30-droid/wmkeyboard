@@ -81,6 +81,7 @@ import com.wasimaster.wmkeyboard.core.icons.symbols.outlined.Search
 import com.wasimaster.wmkeyboard.core.icons.symbols.outlined.Folder
 import com.wasimaster.wmkeyboard.core.icons.symbols.automirrored.outlined.ArrowBack
 import com.wasimaster.wmkeyboard.core.icons.symbols.outlined.Edit
+import com.wasimaster.wmkeyboard.core.icons.symbols.outlined.Label
 import com.wasimaster.wmkeyboard.core.icons.symbols.outlined.GridView
 import com.wasimaster.wmkeyboard.core.icons.symbols.outlined.PushPin
 import com.wasimaster.wmkeyboard.core.icons.symbols.outlined.ViewAgenda
@@ -252,6 +253,8 @@ data class ClipboardPanelActions(
     val onZawgyi: (List<Long>) -> Unit = {},
     /** The hold popup's Tags: the editor opens on this clip's tags (#612). */
     val onTags: (ClipItem) -> Unit = {},
+    /** The hold popup's Name/Label: the editor opens to give this clip a name. */
+    val onLabel: (ClipItem) -> Unit = {},
     /** A tag already in the history, pressed under the tags editor (#612). */
     val onTagAdd: (String) -> Unit = {},
     /** A text clip's QR code: the QR tool, on the clip's text (#766). */
@@ -2313,6 +2316,9 @@ private fun ClipHoldPopup(
                 onTags = if (hold.picked == null) {
                     { onDismiss(); callbacks.actions.onTags(item) }
                 } else null,
+                onLabel = if (hold.picked == null) {
+                    { onDismiss(); callbacks.actions.onLabel(item) }
+                } else null,
                 onQr = if (clipQrable(item) && hold.picked == null) {
                     { onDismiss(); callbacks.actions.onQr(item) }
                 } else null,
@@ -2380,6 +2386,9 @@ private fun ClipHoldPopup(
         onTags = if (hold.picked == null) {
             { onDismiss(); callbacks.actions.onTags(item) }
         } else null,
+        onLabel = if (hold.picked == null) {
+            { onDismiss(); callbacks.actions.onLabel(item) }
+        } else null,
         onPaste = { onDismiss(); callbacks.onItem(item) },
         onDismiss = onDismiss,
     )
@@ -2403,6 +2412,8 @@ private class ClipTextActions(
     val onKeepOnly: (() -> Unit)? = null,
     /** The clip's tags, in the editor (#612). */
     val onTags: (() -> Unit)? = null,
+    /** The clip's custom name/label, in the editor. */
+    val onLabel: (() -> Unit)? = null,
     /** The clip as a QR code (#766). */
     val onQr: (() -> Unit)? = null,
     /** The clip searched for on the web, or on Wikipedia (#914). */
@@ -2535,6 +2546,9 @@ private fun ClipTextActionButton(action: ClipHoldAction, item: ClipItem, actions
         }
         ClipHoldAction.EDIT -> actions.onEdit?.let {
             ClipTextActionIcon(Icons.Outlined.Edit, stringResource(R.string.ime_clip_edit), tint, it)
+        }
+        ClipHoldAction.LABEL -> actions.onLabel?.let {
+            ClipTextActionIcon(Icons.Outlined.Label, stringResource(R.string.ime_clip_name), tint, it)
         }
         ClipHoldAction.TAGS -> actions.onTags?.let {
             ClipTextActionIcon(Icons.Outlined.Sell, stringResource(R.string.ime_clip_tags), tint, it)
@@ -2850,6 +2864,7 @@ private fun ClipCard(
                 .padding(if (item.kind == ClipKind.IMAGE || item.kind == ClipKind.VIDEO) 5.dp else 10.dp),
         ) {
             if (showInfo) ClipHoldPopup(item, hold, callbacks) { showInfo = false }
+            if (!item.label.isNullOrBlank()) ClipNameLine(item.label)
             ClipBody(item, maxLines = lines, hold = hold)
             if (item.tags.isNotEmpty()) ClipTagsLine(item.tags, Modifier.padding(top = 4.dp))
             val icons = hold.icons && hold.entities.isNotEmpty()
@@ -3078,6 +3093,7 @@ private fun ClipRow(
                     .clip(RoundedCornerShape(8.dp)),
             ) { ClipBody(item, maxLines = lines, hold = hold) }
             Column(modifier = Modifier.weight(1f)) {
+                if (!item.label.isNullOrBlank()) ClipNameLine(item.label)
                 Text(
                     stringResource(
                         if (item.kind == ClipKind.IMAGE) R.string.ime_clip_type_image else R.string.ime_clip_type_video,
@@ -3090,6 +3106,7 @@ private fun ClipRow(
             }
         } else {
             Column(modifier = Modifier.weight(1f)) {
+                if (!item.label.isNullOrBlank()) ClipNameLine(item.label)
                 ClipBody(item, maxLines = lines, hold = hold)
                 if (item.tags.isNotEmpty()) ClipTagsLine(item.tags, Modifier.padding(top = 2.dp))
                 if (item.kind == ClipKind.HTML && hold.typeTag) {
@@ -3115,6 +3132,32 @@ private fun ClipRow(
                 if (buttons) ClipActions(item, hold, callbacks) else if (shortcut) ClipShortcutButton(item, hold, callbacks)
             }
         }
+    }
+}
+
+/** A clip's custom name, on one line above its body, with the label icon in the accent colour. */
+@Composable
+private fun ClipNameLine(name: String, modifier: Modifier = Modifier) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = modifier.padding(bottom = 2.dp),
+    ) {
+        Icon(
+            Icons.Outlined.Label,
+            contentDescription = null,
+            modifier = Modifier.size(12.dp),
+            tint = LocalKbTheme.current.accent,
+        )
+        Text(
+            name,
+            fontSize = 12.sp,
+            lineHeight = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            color = LocalKbTheme.current.accent,
+        )
     }
 }
 
@@ -3312,7 +3355,7 @@ internal fun ClipEditDialog(
             Column(modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 2.dp, bottom = 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        Icons.Outlined.Edit,
+                        if (edit.isLabel) Icons.Outlined.Label else Icons.Outlined.Edit,
                         contentDescription = null,
                         modifier = Modifier.size(16.dp),
                         tint = kb.popupText.copy(alpha = 0.7f),
@@ -3320,14 +3363,20 @@ internal fun ClipEditDialog(
                     Spacer(Modifier.width(6.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            stringResource(if (edit.tags) R.string.ime_clip_tags_title else R.string.ime_clip_edit_title),
+                            stringResource(
+                                when {
+                                    edit.isLabel -> R.string.ime_clip_name_title
+                                    edit.tags -> R.string.ime_clip_tags_title
+                                    else -> R.string.ime_clip_edit_title
+                                }
+                            ),
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Medium,
                             maxLines = 1,
                             color = kb.popupText,
                         )
                         // Only once the draft has moved: until then nothing is lost.
-                        if (!edit.tags && edit.rich && edit.draft.trim() != edit.original) {
+                        if (!edit.isLabel && !edit.tags && edit.rich && edit.draft.trim() != edit.original) {
                             Text(
                                 stringResource(R.string.ime_clip_edit_rich_note),
                                 fontSize = 10.sp,
@@ -3343,8 +3392,8 @@ internal fun ClipEditDialog(
                     ) { Text(stringResource(CommonR.string.common_cancel)) }
                     TextButton(
                         onClick = actions.onEditSave,
-                        // Saving an empty list takes the tags off (#612).
-                        enabled = edit.tags || edit.draft.isNotBlank(),
+                        // Saving an empty list takes the tags off (#612); saving empty name clears the name.
+                        enabled = edit.tags || edit.isLabel || edit.draft.isNotBlank(),
                         modifier = Modifier.focusRing(focused == 1, RoundedCornerShape(18.dp)),
                     ) { Text(stringResource(R.string.ime_clip_edit_save), fontWeight = FontWeight.SemiBold) }
                 }
@@ -3363,7 +3412,11 @@ internal fun ClipEditDialog(
                     ClipEditText(
                         text = edit.draft,
                         placeholder = stringResource(
-                            if (edit.tags) R.string.ime_clip_tags_placeholder else R.string.ime_clip_edit_placeholder,
+                            when {
+                                edit.isLabel -> R.string.ime_clip_name_placeholder
+                                edit.tags -> R.string.ime_clip_tags_placeholder
+                                else -> R.string.ime_clip_edit_placeholder
+                            }
                         ),
                         textColor = MaterialTheme.colorScheme.onSurface,
                         placeholderColor = MaterialTheme.colorScheme.onSurfaceVariant,

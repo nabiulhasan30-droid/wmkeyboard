@@ -53278,6 +53278,7 @@ open class WMKeyboardService : InputMethodService() {
         onCombineDeleteToggle = ::onClipCombineDeleteToggle,
         onTidy = ::onClipboardTidy,
         onZawgyi = ::onClipboardZawgyi,
+        onLabel = ::onClipLabelStart,
         onTags = ::onClipTagsStart,
         onTagAdd = ::onClipTagAdd,
         onQr = ::onClipboardQr,
@@ -53469,6 +53470,30 @@ open class WMKeyboardService : InputMethodService() {
     }
 
     /**
+     * Opens the editor to set or edit [item]'s custom name/label.
+     * Saving blank clears the label.
+     */
+    fun onClipLabelStart(item: com.wasimaster.wmkeyboard.core.clipboard.ClipItem) {
+        if (!isClipboardAccessible()) return
+        val current = clipboardStore.items().firstOrNull { it.id == item.id } ?: return
+        vibrate()
+        val existing = current.label.orEmpty()
+        _uiState.update {
+            it.copy(
+                clipEdit = ClipEdit(
+                    id = current.id,
+                    original = existing,
+                    draft = existing,
+                    isLabel = true,
+                ),
+                clipboardSearchActive = false,
+                clipboardQuery = "",
+                panelFocus = null,
+            )
+        }
+    }
+
+    /**
      * Opens the editor on [item]'s tags (#612), a list separated by commas
      * with the caret after a fresh comma, so the next tag is typed straight
      * away. Any clip can carry tags, a picture or a secret included.
@@ -53525,6 +53550,14 @@ open class WMKeyboardService : InputMethodService() {
      */
     fun onClipEditSave() {
         val edit = _uiState.value.clipEdit ?: return
+        if (edit.isLabel) {
+            vibrate()
+            if (clipboardStore.setLabel(edit.id, edit.draft)) {
+                saveClipboardSoon()
+            }
+            _uiState.update { it.copy(clipEdit = null, clipboardItems = clipboardStore.items()) }
+            return
+        }
         if (edit.tags) {
             vibrate()
             if (clipboardStore.setTags(edit.id, com.wasimaster.wmkeyboard.core.clipboard.parseClipTags(edit.draft))) {

@@ -7667,6 +7667,7 @@ enum class ClipHoldAction {
     SHOW_IN_HISTORY,
     KEEP_ONLY,
     EDIT,
+    LABEL,
     TAGS,
     QR,
     WEB_SEARCH,

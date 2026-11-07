@@ -102,6 +102,11 @@ data class ClipItem(
      * Kept as typed, without a leading `#`, each one at most once.
      */
     val tags: List<String> = emptyList(),
+    /**
+     * An optional user-assigned custom name / label for this clip.
+     * Shown as a badge on the clip card and searched with its text.
+     */
+    val label: String? = null,
 )
 
 /**
@@ -140,6 +145,7 @@ fun ClipItem.searchHaystack(): String = searchParts().joinToString(" ")
  * clip's text rather than to wherever it happens to sit in the joined string.
  */
 private fun ClipItem.searchParts(): List<String> = buildList {
+    label?.let(::add)
     add(text)
     fileName?.let(::add)
     linkPreview?.let { preview ->
@@ -680,6 +686,20 @@ class ClipboardStore(
         return true
     }
 
+    /**
+     * Sets or clears a clip's user-assigned [ClipItem.label].
+     * Blank or empty strings remove the label. Returns whether anything changed.
+     */
+    @Synchronized
+    fun setLabel(id: Long, label: String?): Boolean {
+        val index = items.indexOfFirst { it.id == id }
+        if (index < 0) return false
+        val trimmed = label?.trim()?.takeIf { it.isNotBlank() }
+        if (items[index].label == trimmed) return false
+        items[index] = items[index].copy(label = trimmed)
+        return true
+    }
+
     @Synchronized
     fun setPinned(id: Long, pinned: Boolean) {
         val index = items.indexOfFirst { it.id == id }
@@ -729,6 +749,7 @@ class ClipboardStore(
             sensitive = item.sensitive || duplicate?.sensitive == true,
             // The other clip's tags come along, as its pin does (#612).
             tags = parseClipTags((item.tags + duplicate?.tags.orEmpty()).joinToString(",")),
+            label = item.label ?: duplicate?.label,
             editedAt = now,
         )
         items[index] = edited

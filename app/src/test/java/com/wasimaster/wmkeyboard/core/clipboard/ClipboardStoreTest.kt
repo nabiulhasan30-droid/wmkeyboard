@@ -28,6 +28,33 @@ class ClipboardStoreTest {
         assertEquals(2, texts.size)
     }
 
+    @Test fun setLabelAndSearch() {
+        val store = ClipboardStore(null)
+        val clip = store.add("secret text 123", now = 1000)!!
+        assertNull(clip.label)
+
+        assertTrue(store.setLabel(clip.id, "My Password"))
+        val updated = store.items(now = 2000).first()
+        assertEquals("My Password", updated.label)
+        assertTrue(updated.matchesQuery("password"))
+        assertTrue(updated.matchesQuery("My"))
+
+        // Blank clears label
+        assertTrue(store.setLabel(clip.id, "   "))
+        val cleared = store.items(now = 3000).first()
+        assertNull(cleared.label)
+    }
+
+    @Test fun editTextPreservesLabel() {
+        val store = ClipboardStore(null)
+        val clip = store.add("original text", now = 1000)!!
+        store.setLabel(clip.id, "Important Note")
+
+        val edited = store.editText(clip.id, "modified text", now = 2000)
+        assertNotNull(edited)
+        assertEquals("Important Note", edited!!.label)
+    }
+
     @Test fun pinnedFirstAndSurvivesExpiry() {
         val store = ClipboardStore(null, expiryMillis = 100)
         val old = store.add("keep me", now = 0)!!

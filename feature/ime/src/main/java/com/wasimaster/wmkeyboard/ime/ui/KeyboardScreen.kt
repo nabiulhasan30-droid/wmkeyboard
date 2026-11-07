@@ -119,6 +119,7 @@ import com.wasimaster.wmkeyboard.core.icons.symbols.outlined.AudioFile
 import com.wasimaster.wmkeyboard.core.icons.symbols.outlined.Description
 import com.wasimaster.wmkeyboard.core.icons.symbols.outlined.Download
 import com.wasimaster.wmkeyboard.core.icons.symbols.outlined.Edit
+import com.wasimaster.wmkeyboard.core.icons.symbols.outlined.Label
 import com.wasimaster.wmkeyboard.core.icons.symbols.outlined.Folder
 import com.wasimaster.wmkeyboard.core.icons.symbols.outlined.FolderOpen
 import com.wasimaster.wmkeyboard.core.icons.symbols.outlined.SwapHoriz
@@ -33250,6 +33251,8 @@ internal fun ClipInfoPopup(
     onJump: (() -> Unit)? = null,
     /** The clip's tags, in the editor (#612). */
     onTags: (() -> Unit)? = null,
+    /** The clip's custom name/label, in the editor. */
+    onLabel: (() -> Unit)? = null,
     /** Pastes the clip, as a tap on it does; at the end of the action row (#612). */
     onPaste: (() -> Unit)? = null,
     onDismiss: () -> Unit,
@@ -33307,6 +33310,9 @@ internal fun ClipInfoPopup(
                         .padding(start = 12.dp, end = 4.dp, top = 10.dp, bottom = 2.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
+                    item.label?.let {
+                        ClipInfoRow(stringResource(R.string.ime_clip_info_name), it, kb.popupText)
+                    }
                     ClipInfoRow(
                         stringResource(R.string.ime_clip_info_copied),
                         "$relative\n$exact",
@@ -33356,6 +33362,9 @@ internal fun ClipInfoPopup(
                                 }
                                 onTags?.let {
                                     ClipTextActionIcon(Icons.Outlined.Sell, stringResource(R.string.ime_clip_tags), tint, it)
+                                }
+                                onLabel?.let {
+                                    ClipTextActionIcon(Icons.Outlined.Label, stringResource(R.string.ime_clip_name), tint, it)
                                 }
                                 onEdit?.let {
                                     ClipTextActionIcon(Icons.Outlined.Edit, stringResource(R.string.ime_clip_edit), tint, it)
