@@ -2864,7 +2864,7 @@ private fun ClipCard(
                 .padding(if (item.kind == ClipKind.IMAGE || item.kind == ClipKind.VIDEO) 5.dp else 10.dp),
         ) {
             if (showInfo) ClipHoldPopup(item, hold, callbacks) { showInfo = false }
-            if (!item.label.isNullOrBlank()) ClipNameLine(item.label)
+            item.label?.takeIf { it.isNotBlank() }?.let { ClipNameLine(it) }
             ClipBody(item, maxLines = lines, hold = hold)
             if (item.tags.isNotEmpty()) ClipTagsLine(item.tags, Modifier.padding(top = 4.dp))
             val icons = hold.icons && hold.entities.isNotEmpty()
@@ -3093,7 +3093,7 @@ private fun ClipRow(
                     .clip(RoundedCornerShape(8.dp)),
             ) { ClipBody(item, maxLines = lines, hold = hold) }
             Column(modifier = Modifier.weight(1f)) {
-                if (!item.label.isNullOrBlank()) ClipNameLine(item.label)
+                item.label?.takeIf { it.isNotBlank() }?.let { ClipNameLine(it) }
                 Text(
                     stringResource(
                         if (item.kind == ClipKind.IMAGE) R.string.ime_clip_type_image else R.string.ime_clip_type_video,
@@ -3106,7 +3106,7 @@ private fun ClipRow(
             }
         } else {
             Column(modifier = Modifier.weight(1f)) {
-                if (!item.label.isNullOrBlank()) ClipNameLine(item.label)
+                item.label?.takeIf { it.isNotBlank() }?.let { ClipNameLine(it) }
                 ClipBody(item, maxLines = lines, hold = hold)
                 if (item.tags.isNotEmpty()) ClipTagsLine(item.tags, Modifier.padding(top = 2.dp))
                 if (item.kind == ClipKind.HTML && hold.typeTag) {
