@@ -1,1106 +1,171 @@
-name: Release
+name: Build & Release APK
 
-# Tag a commit `v0.3.0` and push it. The tag must match wmkb.versionName in
-# gradle.properties or the first job stops the run.
 on:
   push:
-    tags: ['v*']
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: 'Build everything but do not publish a GitHub release'
+      release_tag:
+        description: 'Release Tag (leave empty to use gradle.properties version)'
+        required: false
+        default: ''
+        type: string
+      release_title:
+        description: 'Release Title (optional)'
+        required: false
+        default: ''
+        type: string
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        default: false
         type: boolean
-        default: true
 
 permissions:
   contents: write
 
 env:
-  GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx8g -Dorg.gradle.daemon=false
+  WMKB_ENABLE_PLAY_STORE: "false"
+  WMKB_ENABLE_GMS: "false"
+  GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx6g -Dorg.gradle.daemon=false
 
 jobs:
-  verify:
-    name: Verify version
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.v.outputs.version }}
-      buildable: ${{ steps.v.outputs.buildable }}
-    steps:
-      - uses: actions/checkout@v7
-      - id: v
-        run: |
-          declared=$(grep '^wmkb.versionName=' gradle.properties | cut -d= -f2)
-          # Tags older than this pipeline keep the version in
-          # app/build.gradle.kts and cannot be built by it. They were tagged
-          # after the fact so their notes have somewhere to live, so stand the
-          # run down rather than failing it; their releases are made by hand.
-          if [ -z "$declared" ]; then
-            echo "::notice::${{ github.ref_name }} has no wmkb.versionName and predates this workflow. Nothing to build."
-            {
-              echo "version="
-              echo "buildable=false"
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "buildable=true" >> "$GITHUB_OUTPUT"
-          echo "version=$declared" >> "$GITHUB_OUTPUT"
-          if [ "${{ github.ref_type }}" = 'tag' ]; then
-            tag='${{ github.ref_name }}'
-            if [ "v$declared" != "$tag" ]; then
-              echo "::error::Tag $tag does not match wmkb.versionName=$declared"
-              exit 1
-            fi
-          fi
-          echo "Releasing $declared"
-
-      # F-Droid and Play read the release notes by the manifest's versionCode,
-      # which has an ABI digit from 0.6.2, and F-Droid reads them from the
-      # tagged commit, so the copies have to be in it already.
-      - name: Check the changelog copies
-        if: steps.v.outputs.buildable == 'true'
-        run: scripts/changelog-abi-copies.sh --check
-
-  apks:
-    name: Signed APKs (direct download)
-    needs: verify
-    if: needs.verify.outputs.buildable == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          build-scan-publish: true
-          build-scan-terms-of-use-url: "https://gradle.com/terms-of-service"
-          build-scan-terms-of-use-agree: "yes"
-
-      # The signing block resolves RELEASE_STORE_FILE against the repo root, so
-      # the keystore is written there and never leaves the runner.
-      - name: Restore keystore
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-        run: |
-          if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "::error::KEYSTORE_BASE64 is not set. Release builds must be signed."
-            exit 1
-          fi
-          echo "$KEYSTORE_BASE64" | base64 -d > release.keystore
-
-      # assets/supporters.json is what the app lists before its own network
-      # check, and all a no-internet build ever shows. Refresh it from the live
-      # /api/supporters so each release names everyone who tipped up to the
-      # build, not up to the last time someone ran `npm run supporters`. Site
-      # down: keep the committed copy, never fail a release over a credits list.
-      # F-Droid builds from the tagged source, so its APK has the committed one.
-      - name: Refresh the supporters list
-        run: node docs/scripts/sync-supporters.mjs || echo "::warning::Could not reach /api/supporters; this build ships the committed supporters.json"
-
-      # The all-languages build peaks just after R8: the 8 GB Gradle heap, its
-      # forked daemon and aapt2 converting every language's resources, on a
-      # 16 GB runner. Past that GitHub loses the runner with no error of our
-      # own (0.6.5's dry runs, twice at convertShrunkResourcesToBinary). Swap
-      # takes the peak instead.
-      - name: More swap for the second build
-        run: |
-          sudo swapoff -a || true
-          dir=/mnt; [ -d "$dir" ] || dir=/
-          sudo fallocate -l 12G "$dir/wmkb.swap"
-          sudo chmod 600 "$dir/wmkb.swap"
-          sudo mkswap "$dir/wmkb.swap" > /dev/null
-          sudo swapon "$dir/wmkb.swap"
-          free -h
-
-      # splitApks=true gives one APK per ABI instead of one fat universal APK,
-      # which is what the download page wants. Play channel off: this build must
-      # not carry the in-app-update library, since it only works via Play.
-      - name: Build release APKs
-        env:
-          RELEASE_STORE_FILE: release.keystore
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-          WMKB_ENABLE_PLAY_STORE: 'false'
-          WMKB_ENABLE_GMS: 'true'
-          WMKB_SPLIT_APKS: 'true'
-          WMKB_KEYMAN_LAYOUT_PACK: 'true'
-          WMKB_KLIPY_API_KEY: ${{ secrets.WMKB_KLIPY_API_KEY }}
-          WMKB_GIPHY_API_KEY: ${{ secrets.WMKB_GIPHY_API_KEY }}
-          WMKB_BRAVE_API_KEY: ${{ secrets.WMKB_BRAVE_API_KEY }}
-          WMKB_TRANSLATE_API_KEY: ${{ secrets.WMKB_TRANSLATE_API_KEY }}
-          WMKB_UNSPLASH_API_KEY: ${{ secrets.WMKB_UNSPLASH_API_KEY }}
-          WMKB_PEXELS_API_KEY: ${{ secrets.WMKB_PEXELS_API_KEY }}
-          WMKB_DROPBOX_APP_KEY: ${{ secrets.WMKB_DROPBOX_APP_KEY }}
-          WMKB_ONEDRIVE_CLIENT_ID: ${{ secrets.WMKB_ONEDRIVE_CLIENT_ID }}
-          WMKB_BOX_CLIENT_ID: ${{ secrets.WMKB_BOX_CLIENT_ID }}
-          WMKB_BOX_CLIENT_SECRET: ${{ secrets.WMKB_BOX_CLIENT_SECRET }}
-          WMKB_SMARTTHINGS_CLIENT_ID: ${{ secrets.WMKB_SMARTTHINGS_CLIENT_ID }}
-          WMKB_SMARTTHINGS_CLIENT_SECRET: ${{ secrets.WMKB_SMARTTHINGS_CLIENT_SECRET }}
-        # One variant per Gradle call. All four at once shared one Kotlin
-        # daemon and ran it out of heap at 4 GB (0.5.13, two compiles side by
-        # side), after 0.5.8 had already
-        # needed the 4 GB. In turn, each compile and R8 pass has the daemons to
-        # itself; the daemons stay warm between calls, and the modules below
-        # :app are built once.
-        #
-        # GitHub publishes the standard build, in English, which fetches its
-        # feature libraries (native delivery) and its other interface languages
-        # (language packs) on demand; the all-languages build, which carries
-        # every translation (for Android 7 to 10, which cannot load a pack, and
-        # for anyone who would rather not fetch one); and the offline builds
-        # below. The all-languages build is compiled with the English build's
-        # resource IDs, so the language packs cut from it have the IDs the
-        # English APK asks for. 0.6.3 published it only as copies of the
-        # standard APK under its name.
-        run: |
-          # The English build's resource IDs: the stableIds.txt AGP writes for
-          # every resource link (app/build.gradle.kts, androidResources).
-          ids="$PWD/build/resource-ids.txt"
-          mkdir -p build
-          ./gradlew assembleEnRelease \
-            -Pkotlin.daemon.jvmargs=-Xmx4g --stacktrace
-          cp app/build/intermediates/stable_resource_ids_file/enRelease/processEnReleaseResources/stableIds.txt "$ids"
-          # The first build's Kotlin daemon outlives it, holding up to 4 GB
-          # beside the second build's 8 GB Gradle heap and R8. Likely why 0.6.5's dry
-          # run lost both runners mid-build ("starves it for CPU/Memory").
-          # The second build starts a fresh daemon if it needs one.
-          pkill -f KotlinCompileDaemon || true
-          ./gradlew assembleIntlRelease "-Pwmkb.stableResourceIds=$ids" \
-            -Pkotlin.daemon.jvmargs=-Xmx4g --stacktrace
-
-      # Versioned filenames (wmkeyboard-0.6.3-vc370-full-en-arm64-v8a.apk) so
-      # APKs from different releases can sit in the same Downloads folder
-      # without the browser calling them duplicates. vc = versionCode, which
-      # moves even when the name does not (a re-cut of the same versionName).
-      #
-      # `full` is the edition token from when there were two (full, lite). The
-      # app has no such flavour since 0.6.3, but every install already out
-      # there only parses names that carry it (ReleaseAssets), so every
-      # published name keeps it.
-      - name: Collect artifacts
-        # The language packs are signed here, before the keystore is wiped.
-        env:
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: |
-          version=$(grep '^wmkb.versionName=' gradle.properties | cut -d= -f2)
-          code=$(grep '^wmkb.versionCode=' gradle.properties | cut -d= -f2)
-          mkdir -p dist
-          find app/build/outputs/apk/en app/build/outputs/apk/intl -name '*-release.apk' | while read -r apk; do
-            name=$(basename "$apk" .apk)   # app-en-arm64-v8a-release
-            name=${name#app-}
-            name=${name%-release}
-            cp "$apk" "dist/wmkeyboard-${version}-vc${code}-full-${name}.apk"
-          done
-          for language in en intl; do
-            ls "dist/wmkeyboard-${version}-vc${code}-full-${language}-arm64-v8a.apk" >/dev/null \
-              || { echo "::error::No ${language} arm64-v8a APK"; exit 1; }
-          done
-          # The baseline profile, as dex metadata the installer compiles with.
-          # The in-app updater stages it beside the APK, so a GitHub update is
-          # compiled at install the way a Play install is, instead of running
-          # interpreted until Android's overnight maintenance gets to it (11.5%
-          # janky frames against 2.5% on a CPH2481). One per variant and API
-          # range, named by output-metadata.json: the ABI splits of a variant
-          # carry the same dex, so they share one.
-          for meta in app/build/outputs/apk/{en,intl}/release/output-metadata.json; do
-            dir=$(dirname "$meta")
-            language=$(basename "$(dirname "$dir")")   # intl
-            jq -r '.baselineProfiles[]? | "\(.minApi) \(.baselineProfiles[0])"' "$meta" \
-              | while read -r api dm; do
-                if [ -f "$dir/$dm" ]; then
-                  cp "$dir/$dm" "dist/wmkeyboard-${version}-vc${code}-full-${language}-api${api}.dm"
-                else
-                  echo "::warning::No dex metadata at $dir/$dm"
-                fi
-              done
-          done
-          # R8 mappings, one per variant (ABI splits share one). Taken from this
-          # job's build, not the bundle job's: the Play flags change what R8
-          # renames, so the AAB's map does not retrace these APKs. The AAB
-          # carries its own map in BUNDLE-METADATA, which Play reads by itself.
-          #
-          # Four now rather than two. The two language builds are separate R8
-          # runs, so their maps are not interchangeable even though the Kotlin
-          # that went in was identical.
-          # The all-languages one too: the offline build is that variant with
-          # a different manifest, and the retrace workflow uses this map for it.
-          for language in intl en; do
-            map="app/build/outputs/mapping/${language}Release/mapping.txt"
-            if [ ! -f "$map" ]; then
-              echo "::error::No R8 mapping at $map"
-              exit 1
-            fi
-            gzip -9c "$map" \
-              > "dist/wmkeyboard-${version}-vc${code}-full-${language}-mapping.txt.gz"
-          done
-          # Native symbols. Both language builds carry the same .so files, but
-          # each variant writes its own zip and the release grid links them
-          # separately.
-          for lower in en intl; do
-            syms="app/build/outputs/native-debug-symbols/${lower}Release/native-debug-symbols.zip"
-            if [ -f "$syms" ]; then
-              cp "$syms" "dist/wmkeyboard-${version}-vc${code}-full-${lower}-native-symbols.zip"
-            else
-              echo "::warning::No native debug symbols at $syms"
-            fi
-          done
-          # The language packs, cut from the all-languages universal APK and
-          # signed with the release key the app checks them against.
-          intl=$(find app/build/outputs/apk/intl -name '*-universal-release.apk' | head -1)
-          [ -n "$intl" ] || { echo "::error::No all-languages universal APK"; exit 1; }
-          .github/scripts/language-packs.sh "$intl" dist "$version" "$code"
-          # The libraries the standard build fetches from the data repository,
-          # as the publish job uploads them there.
-          standard=$(find app/build/outputs/apk/en -name '*-universal-release.apk' | head -1)
-          .github/scripts/collect-natives.sh "$standard" natives
-          # The Keyman grids the standard build fetches instead of carrying.
-          mkdir -p layouts
-          cp app/build/keymanLayoutPack/keyman-layouts-*.zip layouts/
-          # No SHA256SUMS.txt: GitHub lists a SHA-256 digest for every release
-          # asset, which is what the in-app updater checks, and the file sat at
-          # the top of the asset list where nobody installing wants it.
-          ls -l dist
-
-      - name: Wipe keystore
-        if: always()
-        run: rm -f release.keystore
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: release-apks
-          path: dist/
-          retention-days: 30
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: natives-standard
-          path: natives/
-          retention-days: 30
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: keyman-layouts
-          path: layouts/
-          retention-days: 30
-
-      # The resource IDs the language packs were cut against, for the
-      # `pack-ids` check: the offline English build must match them.
-      - uses: actions/upload-artifact@v7
-        with:
-          name: resource-ids-standard
-          path: build/resource-ids.txt
-          retention-days: 30
-
-  # The reference APK for F-Droid's reproducible build. F-Droid builds each tag
-  # from source itself, compares its unsigned APK with this one, and if they
-  # match apart from the signature it copies this signature onto its build and
-  # publishes that, so F-Droid users get an APK signed with our key. The recipe
-  # points at this file through `Binaries:` (fdroid/com.wasimaster.wmkeyboard.yml).
-  #
-  # It has to be the build F-Droid makes, byte for byte, and since 0.6.0 that
-  # build compiles its native libraries (Harper, whisper.cpp, ExecuTorch and
-  # the rest native/build-fdroid-libs.sh lists) from source with the NDK, Rust and CMake rather than taking
-  # the committed ones. So the APK is not built here with Gradle: F-Droid's own
-  # `fdroid build` makes it, from fdroidserver master inside F-Droid's
-  # buildserver image, from the recipe in this repo with one entry for this
-  # commit (.github/scripts/fdroid-build.sh, which follows the `fdroid build`
-  # job in fdroiddata's CI). That also runs their source scanner over the tag,
-  # so a recipe problem shows up here rather than days later on their side.
-  # The unsigned APK it leaves is then signed with the release key, keeping
-  # its alignment, which is what apksigcopier needs to carry the signature
-  # back onto F-Droid's build.
-  #
-  # One per ABI from 0.6.2. F-Droid builds the recipe's three entries as three
-  # APKs and serves each phone the one for its processor, told apart by the
-  # versionCode's last digit (abiDigits in app/build.gradle.kts), so there are
-  # three reference APKs to match, named by that full versionCode because
-  # `Binaries:` only knows %v and %c. One fat APK carried every ABI's native
-  # code to every phone: 98 MB in 0.6.0 against 82 MB for arm64 alone (#801).
-  fdroid:
-    name: F-Droid reference APK (${{ matrix.abi }})
-    needs: verify
-    if: needs.verify.outputs.buildable == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 300
-    strategy:
-      # All three logs, even when one ABI fails: the release waits on every one.
-      fail-fast: false
-      matrix:
-        abi: [armeabi-v7a, arm64-v8a, x86_64]
-    steps:
-      - uses: actions/checkout@v7
-
-      # The buildserver image, ExecuTorch's three builds and the Gradle build
-      # do not fit in the runner's default free space.
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk /opt/ghc \
-            /usr/local/.ghcup /usr/share/swift /usr/local/share/powershell /opt/hostedtoolcache/CodeQL
-          df -h /
-
-      - name: Build with fdroidserver
-        run: |
-          version='${{ needs.verify.outputs.version }}'
-          code=$(grep '^wmkb.versionCode=' gradle.properties | cut -d= -f2)
-          docker run --rm -v "$PWD:/src" \
-            registry.gitlab.com/fdroid/fdroidserver:buildserver-trixie \
-            bash /src/.github/scripts/fdroid-build.sh "$GITHUB_SHA" "$version" "$code" '${{ matrix.abi }}'
-
-      # A build that dies without a word was usually killed from outside:
-      # the kernel's log says so, and the numbers say what was left.
-      - name: Diagnose a failed build
-        if: failure()
-        run: |
-          sudo dmesg -T 2>/dev/null | grep -iE 'killed process|out of memory|oom' | tail -20 || true
-          free -h
-          df -h /
-
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: fdroid-build-log-${{ matrix.abi }}
-          path: |
-            dist/fdroid-build-${{ matrix.abi }}.log
-            dist/fdroid-unsigned-${{ matrix.abi }}.apk
-          retention-days: 30
-
-      - name: Restore keystore
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-        run: |
-          if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "::error::KEYSTORE_BASE64 is not set. Release builds must be signed."
-            exit 1
-          fi
-          echo "$KEYSTORE_BASE64" | base64 -d > release.keystore
-
-      # --alignment-preserved: apksigner otherwise re-aligns the entries, and
-      # the APK would no longer be F-Droid's build plus a signature.
-      - name: Sign
-        env:
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: |
-          version='${{ needs.verify.outputs.version }}'
-          code=$(grep '^wmkb.versionCode=' gradle.properties | cut -d= -f2)
-          case '${{ matrix.abi }}' in
-            armeabi-v7a) code=$((code * 10 + 1)) ;;
-            arm64-v8a)   code=$((code * 10 + 2)) ;;
-            x86_64)      code=$((code * 10 + 3)) ;;
-          esac
-          apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
-          mkdir -p out
-          "$apksigner" sign --ks release.keystore --ks-key-alias "$RELEASE_KEY_ALIAS" \
-            --ks-pass env:RELEASE_STORE_PASSWORD --key-pass env:RELEASE_KEY_PASSWORD \
-            --alignment-preserved \
-            --out "out/wmkeyboard-${version}-vc${code}-fdroid.apk" 'dist/fdroid-unsigned-${{ matrix.abi }}.apk'
-          rm -f out/*.idsig
-
-      - name: Wipe keystore
-        if: always()
-        run: rm -f release.keystore
-
-      # AllowedAPKSigningKeys in the recipe pins this certificate, and F-Droid
-      # refuses a reference APK signed by anything else, or signed with v1
-      # alone. apksigcopier is what F-Droid runs to compare the two builds;
-      # running it here proves the signature carries over.
-      - name: Check
-        run: |
-          out=$(ls out/*-fdroid.apk)
-          apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
-          certs=$("$apksigner" verify --print-certs -v "$out")
-          echo "$certs"
-          echo "$certs" | grep -q 'Verified using v2 scheme (APK Signature Scheme v2): true' \
-            || { echo "::error::$out has no v2 signature"; exit 1; }
-          echo "$certs" | grep -q 'certificate SHA-256 digest: d6c1f30a6116d33e4e778b372f335faa91dad35f657a84e4e7077b29641e7cad' \
-            || { echo "::error::$out is not signed with the key AllowedAPKSigningKeys pins"; exit 1; }
-          unzip -p "$out" META-INF/version-control-info.textproto | grep -q "revision: \"$GITHUB_SHA\"" \
-            || { echo "::error::$out does not record commit $GITHUB_SHA"; exit 1; }
-          # The typing engine must be in it, built from source, for this ABI
-          # and no other. Its other engines are built from source too, but
-          # delivered on demand: pinned, not packaged.
-          abi='${{ matrix.abi }}'
-          unzip -l "$out" | grep -q "lib/$abi/libwm_engine_jni.so" \
-            || { echo "::error::$out has no $abi libwm_engine_jni.so"; exit 1; }
-          # Every gated library native/gates.json has F-Droid build from source, for this ABI.
-          libs=$(python3 native/gates.py fdroid-libs "$abi")
-          [ -n "$libs" ] || { echo "::error::native/gates.py listed no libraries for $abi"; exit 1; }
-          pins=$(unzip -p "$out" assets/native/pins.tsv)
-          for lib in $libs; do
-            if unzip -l "$out" | grep -q "lib/$abi/$lib"; then
-              echo "::error::$out packages $lib, which it should deliver on demand"; exit 1
-            fi
-            echo "$pins" | grep -qP "\t$abi\t$lib\t" \
-              || { echo "::error::$out does not pin $abi $lib"; exit 1; }
-            ls dist/fdroid-natives-$abi/*-"$lib" >/dev/null \
-              || { echo "::error::the build left no $lib for the natives release"; exit 1; }
-          done
-          others=$(unzip -Z1 "$out" 'lib/*' | grep -v "^lib/$abi/" || true)
-          [ -z "$others" ] || { echo "::error::$out carries another ABI's code:"; echo "$others"; exit 1; }
-          # The manifest's versionCode is the one the file is named by.
-          aapt2=$(ls -d "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
-          want=$(basename "$out" | sed -E 's/.*-vc([0-9]+)-fdroid\.apk/\1/')
-          "$aapt2" dump badging "$out" | grep -q "versionCode='$want'" \
-            || { echo "::error::$out does not declare versionCode $want"; exit 1; }
-          PATH="$(dirname "$apksigner"):$PATH" \
-            pipx run apksigcopier==1.1.1 compare "$out" --unsigned "dist/fdroid-unsigned-$abi.apk"
-          mkdir -p dist-ref && mv "$out" dist-ref/
-
-      # R8's mapping of this build. F-Droid serves this same build, byte for
-      # byte, so the retrace workflow reads a crash from an F-Droid install
-      # with it (#963). Named like the APK, by the full versionCode: the
-      # crash record names the release and not the ABI, so the workflow
-      # tries all three and keeps the one that fits.
-      - name: Keep the R8 mapping
-        run: |
-          apk=$(basename dist-ref/*-fdroid.apk .apk)
-          gzip -9c 'dist/fdroid-mapping-${{ matrix.abi }}.txt' > "dist-ref/${apk}-mapping.txt.gz"
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: fdroid-apk-${{ matrix.abi }}
-          path: dist-ref/
-          retention-days: 30
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: natives-fdroid-${{ matrix.abi }}
-          path: dist/fdroid-natives-${{ matrix.abi }}/
-          retention-days: 30
-
-  # The offline build: no INTERNET permission (#292), for people who want a
-  # keyboard that cannot reach the network at all. From 0.6.4 it is as slim
-  # as the standard build: English, with its feature libraries pinned rather
-  # than bundled. It cannot fetch either, so both come in as imports of the
-  # same files the standard build downloads: this release's lang-*.apk packs
-  # (Android 11 and up) and the data repository's `natives` assets. Beside it
-  # an all-languages build (universal only) for Android 7 to 10, which cannot
-  # load a language pack, and for anyone who wants every language built in.
-  # Both install over the standard build and back.
-  #
-  # Its own runner, like `fdroid`: wmkb.noInternet is a project-wide flag, so
-  # it cannot share a Gradle invocation with the regular builds, and a second
-  # invocation in that job would overwrite their release APKs.
-  # Every other input matches the `apks` job, which keeps the dex the same as
-  # the regular builds' and so lets the retrace workflow use their mappings,
-  # and keeps the English build's resource IDs the ones the language packs
-  # were cut against (`pack-ids` checks).
-  offline:
-    name: No-internet APKs
-    needs: verify
-    if: needs.verify.outputs.buildable == 'true'
+  build-and-release:
+    name: Build & Release APK
     runs-on: ubuntu-latest
     timeout-minutes: 90
+
     steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
-
-      - name: Restore keystore
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-        run: |
-          if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "::error::KEYSTORE_BASE64 is not set. Release builds must be signed."
-            exit 1
-          fi
-          echo "$KEYSTORE_BASE64" | base64 -d > release.keystore
-
-      # assets/supporters.json is what the app lists before its own network
-      # check, and all a no-internet build ever shows. Refresh it from the live
-      # /api/supporters so each release names everyone who tipped up to the
-      # build, not up to the last time someone ran `npm run supporters`. Site
-      # down: keep the committed copy, never fail a release over a credits list.
-      # F-Droid builds from the tagged source, so its APK has the committed one.
-      - name: Refresh the supporters list
-        run: node docs/scripts/sync-supporters.mjs || echo "::warning::Could not reach /api/supporters; this build ships the committed supporters.json"
-
-      # As in `apks`: swap for the second build's peak.
-      - name: More swap for the second build
-        run: |
-          sudo swapoff -a || true
-          dir=/mnt; [ -d "$dir" ] || dir=/
-          sudo fallocate -l 12G "$dir/wmkb.swap"
-          sudo chmod 600 "$dir/wmkb.swap"
-          sudo mkswap "$dir/wmkb.swap" > /dev/null
-          sudo swapon "$dir/wmkb.swap"
-          free -h
-
-      - name: Build the no-internet APKs
-        env:
-          RELEASE_STORE_FILE: release.keystore
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-          WMKB_ENABLE_PLAY_STORE: 'false'
-          WMKB_ENABLE_GMS: 'true'
-          WMKB_SPLIT_APKS: 'true'
-          WMKB_NO_INTERNET: 'true'
-          WMKB_KLIPY_API_KEY: ${{ secrets.WMKB_KLIPY_API_KEY }}
-          WMKB_GIPHY_API_KEY: ${{ secrets.WMKB_GIPHY_API_KEY }}
-          WMKB_BRAVE_API_KEY: ${{ secrets.WMKB_BRAVE_API_KEY }}
-          WMKB_TRANSLATE_API_KEY: ${{ secrets.WMKB_TRANSLATE_API_KEY }}
-          WMKB_UNSPLASH_API_KEY: ${{ secrets.WMKB_UNSPLASH_API_KEY }}
-          WMKB_PEXELS_API_KEY: ${{ secrets.WMKB_PEXELS_API_KEY }}
-          WMKB_DROPBOX_APP_KEY: ${{ secrets.WMKB_DROPBOX_APP_KEY }}
-          WMKB_ONEDRIVE_CLIENT_ID: ${{ secrets.WMKB_ONEDRIVE_CLIENT_ID }}
-          WMKB_BOX_CLIENT_ID: ${{ secrets.WMKB_BOX_CLIENT_ID }}
-          WMKB_BOX_CLIENT_SECRET: ${{ secrets.WMKB_BOX_CLIENT_SECRET }}
-          WMKB_SMARTTHINGS_CLIENT_ID: ${{ secrets.WMKB_SMARTTHINGS_CLIENT_ID }}
-          WMKB_SMARTTHINGS_CLIENT_SECRET: ${{ secrets.WMKB_SMARTTHINGS_CLIENT_SECRET }}
-        # One variant per Gradle call, as in `apks`.
-        run: |
-          ./gradlew assembleEnRelease \
-            -Pkotlin.daemon.jvmargs=-Xmx4g --stacktrace
-          mkdir -p build
-          cp app/build/intermediates/stable_resource_ids_file/enRelease/processEnReleaseResources/stableIds.txt \
-            build/resource-ids.txt
-          # As in `apks`: the first build's Kotlin daemon goes before the second.
-          pkill -f KotlinCompileDaemon || true
-          ./gradlew assembleIntlRelease \
-            -Pkotlin.daemon.jvmargs=-Xmx4g --stacktrace
-
-      - name: Wipe keystore
-        if: always()
-        run: rm -f release.keystore
-
-      # `-nointernet-` sits between the languages part and the ABI, where
-      # ReleaseAssets' anchored pattern refuses it, so the in-app updater of a
-      # regular build never offers one of these (ReleaseAssetsTest holds it).
-      #
-      # The permission check is the point of the job: ML Kit declares INTERNET
-      # in its own manifest, so the overlay failing to apply would put it back
-      # without a single build error.
-      - name: Collect and check
-        run: |
-          version=$(grep '^wmkb.versionName=' gradle.properties | cut -d= -f2)
-          code=$(grep '^wmkb.versionCode=' gradle.properties | cut -d= -f2)
-          aapt2=$(ls -d "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
-          mkdir -p dist
-          # The published names keep the `full` edition token (see the apks job).
-          # name:gradle flavour:ABIs. The all-languages one is universal only:
-          # it is for Android 7 to 10, which runs on 32-bit phones as often.
-          for variant in full-en:en:arm64-v8a,universal full-intl:intl:universal; do
-            name=${variant%%:*}
-            rest=${variant#*:}
-            gradle=${rest%%:*}
-            abis=${rest#*:}
-            for abi in ${abis//,/ }; do
-              apk=$(find app/build/outputs/apk -name "app-${gradle}-${abi}-release.apk" | head -1)
-              if [ -z "$apk" ]; then
-                echo "::error::No app-${gradle}-${abi}-release.apk under app/build/outputs/apk"
-                exit 1
-              fi
-              perms=$("$aapt2" dump permissions "$apk")
-              echo "$perms"
-              if echo "$perms" | grep -q "android.permission.INTERNET'"; then
-                echo "::error::$apk still declares android.permission.INTERNET"
-                exit 1
-              fi
-              cp "$apk" "dist/wmkeyboard-${version}-vc${code}-${name}-nointernet-${abi}.apk"
-            done
-            map=app/build/outputs/mapping/${gradle}Release/mapping.txt
-            if [ ! -f "$map" ]; then
-              echo "::error::No R8 mapping at $map"
-              exit 1
-            fi
-            gzip -9c "$map" > "dist/wmkeyboard-${version}-vc${code}-${name}-nointernet-mapping.txt.gz"
-          done
-          ls -l dist
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: offline-apks
-          path: dist/
-          retention-days: 30
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: resource-ids-offline
-          path: build/resource-ids.txt
-          retention-days: 30
-
-  # The language packs are cut from the `apks` job's all-languages build,
-  # compiled with the standard English build's resource IDs. The offline
-  # English build is a separate compile on another runner, so it takes the
-  # same packs only if aapt2 gave it the same IDs, which it should: only its
-  # manifest differs. Checked here rather than assumed, in dry runs too,
-  # because a mismatch would load every pack's strings under the wrong names.
-  pack-ids:
-    name: Language packs fit the offline build
-    needs: [apks, offline]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          name: resource-ids-standard
-          path: standard
-      - uses: actions/download-artifact@v8
-        with:
-          name: resource-ids-offline
-          path: offline
-      - run: |
-          if ! cmp -s standard/resource-ids.txt offline/resource-ids.txt; then
-            echo "::error::The offline English build's resource IDs differ from the standard build's, so this release's language packs would not fit it"
-            diff standard/resource-ids.txt offline/resource-ids.txt | head -40
-            exit 1
-          fi
-          echo "Resource IDs match ($(wc -l < standard/resource-ids.txt) resources)"
-
-  bundle:
-    name: Play bundle (artifact only)
-    needs: verify
-    if: needs.verify.outputs.buildable == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          build-scan-publish: true
-          build-scan-terms-of-use-url: "https://gradle.com/terms-of-service"
-          build-scan-terms-of-use-agree: "yes"
-
-      - name: Restore keystore
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-        run: |
-          if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "::error::KEYSTORE_BASE64 is not set."
-            exit 1
-          fi
-          echo "$KEYSTORE_BASE64" | base64 -d > release.keystore
-
-      # assets/supporters.json is what the app lists before its own network
-      # check, and all a no-internet build ever shows. Refresh it from the live
-      # /api/supporters so each release names everyone who tipped up to the
-      # build, not up to the last time someone ran `npm run supporters`. Site
-      # down: keep the committed copy, never fail a release over a credits list.
-      # F-Droid builds from the tagged source, so its APK has the committed one.
-      - name: Refresh the supporters list
-        run: node docs/scripts/sync-supporters.mjs || echo "::warning::Could not reach /api/supporters; this build ships the committed supporters.json"
-
-      # Play channel on: unbundled ML Kit, in-app updates, and :feature:llm,
-      # :feature:translate, :feature:litert and :feature:handwriting as
-      # on-demand modules. bundle<Variant> ignores the ABI split block.
-      #
-      # The `en` language build, by its real name. Play translates the app
-      # strings itself and injects them into the bundle at upload, so the 48
-      # translations in the repo, which were recovered from Play to begin with,
-      # would only be handed back to it.
-      - name: Build AAB
-        env:
-          RELEASE_STORE_FILE: release.keystore
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-          WMKB_ENABLE_PLAY_STORE: 'true'
-          WMKB_ENABLE_GMS: 'true'
-          WMKB_KEYMAN_LAYOUT_PACK: 'true'
-          WMKB_KLIPY_API_KEY: ${{ secrets.WMKB_KLIPY_API_KEY }}
-          WMKB_GIPHY_API_KEY: ${{ secrets.WMKB_GIPHY_API_KEY }}
-          WMKB_BRAVE_API_KEY: ${{ secrets.WMKB_BRAVE_API_KEY }}
-          WMKB_TRANSLATE_API_KEY: ${{ secrets.WMKB_TRANSLATE_API_KEY }}
-          WMKB_UNSPLASH_API_KEY: ${{ secrets.WMKB_UNSPLASH_API_KEY }}
-          WMKB_PEXELS_API_KEY: ${{ secrets.WMKB_PEXELS_API_KEY }}
-          WMKB_DROPBOX_APP_KEY: ${{ secrets.WMKB_DROPBOX_APP_KEY }}
-          WMKB_ONEDRIVE_CLIENT_ID: ${{ secrets.WMKB_ONEDRIVE_CLIENT_ID }}
-          WMKB_BOX_CLIENT_ID: ${{ secrets.WMKB_BOX_CLIENT_ID }}
-          WMKB_BOX_CLIENT_SECRET: ${{ secrets.WMKB_BOX_CLIENT_SECRET }}
-          WMKB_SMARTTHINGS_CLIENT_ID: ${{ secrets.WMKB_SMARTTHINGS_CLIENT_ID }}
-          WMKB_SMARTTHINGS_CLIENT_SECRET: ${{ secrets.WMKB_SMARTTHINGS_CLIENT_SECRET }}
-        run: ./gradlew bundleEnRelease --stacktrace
-
-      - name: Wipe keystore
-        if: always()
-        run: rm -f release.keystore
-
-      # The fifth mapping. This job builds with the Play channel flags on, and
-      # those change what R8 renames, so none of the four mappings the `apks`
-      # job publishes retraces a crash from a Play install — which is most of
-      # the crashes anyone will ever paste into an issue. Play Console reads
-      # the copy inside the bundle and needs no help; a reporter on GitHub has
-      # no way to reach it, and neither has the retrace bot. So it goes to the
-      # release like the others.
-      #
-      # `enRelease`: the AAB above is the `en` build, and the mapping has to
-      # come from the same R8 run.
-      - name: Collect the Play mapping
-        run: |
-          version=$(grep '^wmkb.versionName=' gradle.properties | cut -d= -f2)
-          code=$(grep '^wmkb.versionCode=' gradle.properties | cut -d= -f2)
-          map=app/build/outputs/mapping/enRelease/mapping.txt
-          if [ ! -f "$map" ]; then
-            echo "::error::No R8 mapping at $map"
-            exit 1
-          fi
-          mkdir -p dist
-          gzip -9c "$map" > "dist/wmkeyboard-${version}-vc${code}-play-mapping.txt.gz"
-          ls -l dist
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: play-mapping
-          path: dist/*-play-mapping.txt.gz
-          retention-days: 30
-
-      # Not attached to the GitHub release: an AAB is not installable. The
-      # play job below picks it up and uploads it to the internal track.
-      - uses: actions/upload-artifact@v7
-        with:
-          name: play-bundle
-          path: app/build/outputs/bundle/enRelease/*.aab
-          retention-days: 30
-
-  # Uploads the AAB to the Play *internal* track via fastlane; promoting to
-  # production stays a decision you make by hand (`bundle exec fastlane
-  # android promote`, or the Console). Skips itself with a warning when the
-  # service-account secret is absent, so tagging a release still works before
-  # Play API access is configured.
-  # A release commit carrying `[skip play]` goes to GitHub and F-Droid only:
-  # a version Play already has under an older versionCode, where a new upload
-  # would only send production back through review for nothing.
-  play:
-    name: Upload to Play (internal track)
-    needs: [verify, bundle]
-    if: github.ref_type == 'tag' && !inputs.dry_run && !contains(github.event.head_commit.message, '[skip play]')
-    runs-on: ubuntu-latest
-    # The bundle upload alone can take most of an hour (see timeout: in the
-    # Fastfile's internal lane).
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: play-bundle
-          path: dist
-
-      - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
-          bundler-cache: true
-
-      - name: Upload to internal track
-        env:
-          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
-        run: |
-          if [ -z "$PLAY_SERVICE_ACCOUNT_JSON" ]; then
-            echo "::warning::PLAY_SERVICE_ACCOUNT_JSON is not set; skipping the Play upload. Grab the play-bundle artifact and upload it by hand, or add the secret (see docs/development/releasing)."
-            exit 0
-          fi
-          printf '%s' "$PLAY_SERVICE_ACCOUNT_JSON" > play-key.json
-          aab=$(ls dist/*.aab | head -n1)
-          WMKB_PLAY_JSON_KEY=play-key.json bundle exec fastlane android internal "aab:$aab"
-
-      - name: Wipe key
-        if: always()
-        run: rm -f play-key.json
-
-  publish:
-    name: Publish GitHub release
-    # `bundle` as well as `apks`: the Play mapping is a release asset now, and
-    # both jobs carry the same `buildable` gate, so nothing that used to
-    # publish is held back by waiting for it. `fdroid` because F-Droid fetches
-    # its reference APK from this release, and a release without it fails their
-    # build of this version. `offline` for the no-internet APKs, and
-    # `pack-ids` so they never ship beside language packs that do not fit.
-    needs: [verify, apks, bundle, fdroid, offline, pack-ids]
-    if: github.ref_type == 'tag' && !inputs.dry_run
-    runs-on: ubuntu-latest
-    steps:
-      # Full history: the notes script finds the previous tag and walks the
-      # commits between it and this one.
-      - uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v8
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
         with:
-          name: release-apks
-          path: dist
+          distribution: 'temurin'
+          java-version: '21'
 
-      # Built on the other runner with the Play flags on, so it arrives as its
-      # own artifact rather than in release-apks.
-      - uses: actions/download-artifact@v8
-        with:
-          name: play-mapping
-          path: dist
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
 
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: fdroid-apk-*
-          merge-multiple: true
-          path: dist
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: offline-apks
-          path: dist
-
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: natives-*
-          merge-multiple: true
-          path: natives
-
-      # Native delivery: the standard build and the F-Droid build fetch the
-      # project's own feature libraries from the data repository's `natives`
-      # release, by hash. Files are content-addressed and never replaced, so
-      # one that is already there is skipped, and an unchanged library costs
-      # nothing. Done before the app release goes public, so no published APK
-      # ever points at a file that is not there yet. Needs DATA_REPO_TOKEN, a
-      # token with contents: write on wasi-master/wmkeyboard-data.
-      - name: Publish feature libraries to the data repository
-        env:
-          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
-          DATA_REPO: wasi-master/wmkeyboard-data
+      - name: Determine Version & Tag
+        id: ver
         run: |
-          shopt -s nullglob
-          files=(natives/*)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "::error::No feature libraries to publish"
-            exit 1
-          fi
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::error::DATA_REPO_TOKEN is not set; the release would point at libraries that do not exist"
-            exit 1
-          fi
-          gh release view natives --repo "$DATA_REPO" >/dev/null 2>&1 || \
-            gh release create natives --repo "$DATA_REPO" --title "Feature libraries" \
-              --notes "Native libraries WM Keyboard's GitHub and F-Droid builds download on demand, named <sha256>-<library>. Each file's hash is pinned in the app that downloads it. Never replaced: a new build of a library is a new name."
-          have=$(gh release view natives --repo "$DATA_REPO" --json assets -q '.assets[].name')
-          for f in "${files[@]}"; do
-            name=$(basename "$f")
-            hash=${name%%-*}
-            [ "$(sha256sum "$f" | cut -d' ' -f1)" = "$hash" ] || { echo "::error::$name does not hash to its name"; exit 1; }
-            if echo "$have" | grep -qxF "$name"; then
-              echo "have $name"
-            else
-              echo "uploading $name"
-              gh release upload natives --repo "$DATA_REPO" "$f"
-            fi
-          done
-
-      # The Keyman grids, for the builds that fetch them instead of carrying them.
-      # Named by the digest of their contents and never replaced, so a release
-      # whose grids did not change uploads nothing. Before the app release goes
-      # public for the same reason as the libraries above.
-      - uses: actions/download-artifact@v8
-        with:
-          name: keyman-layouts
-          path: layouts
-
-      - name: Publish the Keyman layouts to the data repository
-        env:
-          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
-          DATA_REPO: wasi-master/wmkeyboard-data
-        run: |
-          shopt -s nullglob
-          files=(layouts/keyman-layouts-*.zip)
-          if [ ${#files[@]} -ne 1 ]; then
-            echo "::error::Expected one Keyman layout pack, found ${#files[@]}"
-            exit 1
-          fi
-          gh release view layouts --repo "$DATA_REPO" >/dev/null 2>&1 || \
-            gh release create layouts --repo "$DATA_REPO" --title "Keyman layouts" \
-              --notes "The key grids converted from the Keyman keyboards repository, which WM Keyboard's release builds download when one is switched on, named by the digest of their contents. Each digest is pinned in the app that downloads it. Never replaced: changed grids are a new name."
-          name=$(basename "${files[0]}")
-          if gh release view layouts --repo "$DATA_REPO" --json assets -q '.assets[].name' | grep -qxF "$name"; then
-            echo "have $name"
+          VERSION_NAME=$(grep '^wmkb.versionName=' gradle.properties | cut -d= -f2)
+          VERSION_CODE=$(grep '^wmkb.versionCode=' gradle.properties | cut -d= -f2)
+          
+          INPUT_TAG="${{ github.event.inputs.release_tag }}"
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          elif [ "${{ github.ref_type }}" = 'tag' ]; then
+            TAG="${{ github.ref_name }}"
           else
-            echo "uploading $name"
-            gh release upload layouts --repo "$DATA_REPO" "${files[0]}"
+            TAG="v${VERSION_NAME}"
           fi
+          
+          TITLE="${{ github.event.inputs.release_title }}"
+          if [ -z "$TITLE" ]; then
+            TITLE="WMKeyboard / Nabiul Keyboard ${TAG}"
+          fi
+          
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "Building for Tag: $TAG (Version: $VERSION_NAME, Code: $VERSION_CODE)"
 
-      # Only the manifest differs from the regular build of each, so R8 should
-      # have renamed both the same way, and the retrace workflow, which reads
-      # the variant off either build's crash record, uses the regular mapping.
-      # Identical: drop the copy. Different: keep it, and say so, because the
-      # retrace workflow will not find it by itself.
-      - name: Keep the no-internet mapping only if it differs
+      - name: Set up Permanent Keystore
         run: |
-          shopt -s nullglob
-          cd dist
-          for own in *-nointernet-mapping.txt.gz; do
-            regular=${own/-nointernet/}
-            if [ -f "$regular" ] && cmp -s <(gunzip -c "$own") <(gunzip -c "$regular"); then
-              echo "$own matches $regular; not attaching it"
-              rm "$own"
-            else
-              echo "::warning::$own differs from $regular. Attached, but the retrace workflow will not use it for a no-internet crash."
-            fi
-          done
+          mkdir -p keystore
+          KEYSTORE_PATH="keystore/release.keystore"
+          if [ -f "$KEYSTORE_PATH" ]; then
+            echo "Using existing permanent keystore..."
+          elif [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "Restoring keystore from secret..."
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > "$KEYSTORE_PATH"
+          else
+            echo "Creating permanent fixed release keystore for repository..."
+            keytool -genkeypair -v -keystore "$KEYSTORE_PATH" \
+              -alias nabiul_release_key -keyalg RSA -keysize 2048 -validity 20000 \
+              -storepass nabiul_app_key_2026 -keypass nabiul_app_key_2026 \
+              -dname "CN=Nabiul Keyboard, OU=Nabiul, O=Nabiul, L=Kolkata, ST=WB, C=IN"
+            
+            git config --local user.email "github-actions[bot]@users.noreply.github.com"
+            git config --local user.name "github-actions[bot]"
+            git add keystore/release.keystore
+            git commit -m "chore: persist permanent release keystore for seamless updates [skip ci]" || true
+            git push origin HEAD:main || true
+          fi
+          
+          echo "RELEASE_STORE_FILE=keystore/release.keystore" >> $GITHUB_ENV
+          echo "RELEASE_STORE_PASSWORD=nabiul_app_key_2026" >> $GITHUB_ENV
+          echo "RELEASE_KEY_ALIAS=nabiul_release_key" >> $GITHUB_ENV
+          echo "RELEASE_KEY_PASSWORD=nabiul_app_key_2026" >> $GITHUB_ENV
 
-      # The body is built from the artifacts that were actually produced, so
-      # the download grid carries real file sizes and never links a file the
-      # build did not make.
-      - name: Build release notes
+      - name: Build Release APK
+        env:
+          RELEASE_STORE_FILE: keystore/release.keystore
+          RELEASE_STORE_PASSWORD: nabiul_app_key_2026
+          RELEASE_KEY_ALIAS: nabiul_release_key
+          RELEASE_KEY_PASSWORD: nabiul_app_key_2026
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleIntlRelease -Pwmkb.skipBenchmarks=true --stacktrace
+
+      - name: Sign & Prepare APK for Release
+        run: |
+          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/*/ | sort -V | tail -n 1)
+          APKSIGNER="${BUILD_TOOLS_DIR}apksigner"
+          
+          FOUND_APK=$(find app/build/outputs/apk/intl/release/ -name "*.apk" | head -n 1)
+          if [ -z "$FOUND_APK" ]; then
+            echo "::error::No APK found in app/build/outputs/apk/intl/release/"
+            exit 1
+          fi
+          
+          TAG="${{ steps.ver.outputs.tag }}"
+          OUTPUT_APK="wmkeyboard-${TAG}-release.apk"
+          
+          if ! $APKSIGNER verify "$FOUND_APK" 2>/dev/null; then
+            echo "Signing APK with apksigner..."
+            $APKSIGNER sign \
+              --ks keystore/release.keystore \
+              --ks-key-alias nabiul_release_key \
+              --ks-pass pass:nabiul_app_key_2026 \
+              --key-pass pass:nabiul_app_key_2026 \
+              --out "$OUTPUT_APK" \
+              "$FOUND_APK"
+          else
+            echo "APK already signed by Gradle, copying to $OUTPUT_APK..."
+            cp "$FOUND_APK" "$OUTPUT_APK"
+          fi
+          
+          echo "Verifying final APK signature..."
+          $APKSIGNER verify --verbose --print-certs "$OUTPUT_APK"
+          ls -lh "$OUTPUT_APK"
+
+      - name: Generate Changelog Notes
         id: notes
         run: |
-          code=$(grep '^wmkb.versionCode=' gradle.properties | cut -d= -f2)
-          .github/scripts/release-notes.sh \
-            '${{ needs.verify.outputs.version }}' \
-            "$code" \
-            '${{ github.ref_name }}' \
-            dist \
-            '${{ github.repository }}' > release-body.md
-          echo "--- release body ---"
-          cat release-body.md
+          cat << 'EOF' > release_notes.md
+          ### 🚀 Release Highlights
+          - **Custom Clipboard Names / Labels**: প্রতিটি ক্লিপবোর্ড আইটেমে এখন নিজস্ব নাম/লেবেল সেট করা যায়।
+          - **Smart Search**: ক্লিপবোর্ডে দেওয়া নাম দিয়ে সরাসরি যেকোনো ক্লিপ সার্চ করে বের করা যায়।
+          - **Privacy-First & Offline**: সম্পূর্ণ অফলাইন ও আধুনিক বাংলা ও বহুভাষিক কিবোর্ড।
+          - **Seamless Updates**: পার্মানেন্ট রিলিজ কি-স্টোর দিয়ে সাইন করা, যাতে আগের ভার্সনের ওপর সরাসরি আপডেট ইন্সটল করা যায়।
+          EOF
 
-      # Done with the gh CLI rather than softprops/action-gh-release, which
-      # failed the 0.5.9 publish with "Error creating asset temp dir" and left
-      # a draft carrying three of its twelve files. Uploading one file at a
-      # time is slower and does not fall over.
-      #
-      # The release is made as a draft, filled, and only then published, so it
-      # never appears to a watcher with half its APKs attached. The whole step
-      # is idempotent: a re-run edits and re-uploads over whatever the last
-      # attempt managed.
-      #
-      # `announce` is true only when this run is what makes the release
-      # public: it did not exist, or it was still a draft from an attempt that
-      # died before publishing. A re-run, or a tag moved onto a fixed commit
-      # and rebuilt (0.6.2), updates a release people have already been told
-      # about, and the Telegram step below stays quiet for it.
-      - name: Create release
-        id: release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-          TITLE: WM Keyboard ${{ needs.verify.outputs.version }}
-        run: |
-          shopt -s nullglob
-          files=(dist/*.apk dist/*.dm dist/*-mapping.txt.gz dist/*-native-symbols.zip)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "::error::Nothing in dist/ to attach"
-            exit 1
-          fi
-          if draft=$(gh release view "$TAG" --repo "$REPO" --json isDraft -q .isDraft 2>/dev/null); then
-            if [ "$draft" = true ]; then announce=true; else announce=false; fi
-            gh release edit "$TAG" --repo "$REPO" \
-              --title "$TITLE" --notes-file release-body.md
-          else
-            announce=true
-            gh release create "$TAG" --repo "$REPO" --draft \
-              --title "$TITLE" --notes-file release-body.md
-          fi
-          for f in "${files[@]}"; do
-            echo "uploading $(basename "$f")"
-            gh release upload "$TAG" --repo "$REPO" --clobber "$f"
-          done
-          gh release edit "$TAG" --repo "$REPO" --draft=false --latest
-          echo "announce=$announce" >> "$GITHUB_OUTPUT"
-
-      # Announce the new release on the Telegram community in the
-      # announcements and releases topic (#19), linking the standard English
-      # arm64 APK (telegram_release.py says what it attaches).
-      # Once per release: not when this run only updated a published one.
-      - name: Announce on Telegram
-        if: steps.release.outputs.announce == 'true'
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TAG: ${{ github.ref_name }}
-          REPO: ${{ github.repository }}
-          VERSION: ${{ needs.verify.outputs.version }}
-        run: |
-          if [ -z "$TELEGRAM_TOKEN" ]; then
-            echo "::warning::TELEGRAM_TOKEN is not set; skipping Telegram announcement"
-            exit 0
-          fi
-          python3 .github/scripts/telegram_release.py \
-            --tag "$TAG" \
-            --repo "$REPO" \
-            --version "$VERSION" \
-            --notes-file release-body.md \
-            --dist dist
-
-  # Comments on every issue the release notes link, now that there is a
-  # release to point at. A call rather than a `release: published` trigger in
-  # that workflow, because the release above is published with this run's
-  # token, and GitHub starts no workflow for an event that token caused.
-  issue-comments:
-    name: Tell the linked issues
-    needs: [verify, publish]
-    if: github.ref_type == 'tag' && !inputs.dry_run
-    permissions:
-      contents: read
-      issues: write
-      pull-requests: read
-    uses: ./.github/workflows/release-comments.yml
-    with:
-      tag: ${{ github.ref_name }}
-      # Play is not told about a `[skip play]` release, so the comments
-      # must not promise it there either.
-      stores: ${{ contains(github.event.head_commit.message, '[skip play]') && 'F-Droid' || 'F-Droid,Google Play' }}
-
-  # Points the bug report form at the version just published, so reporters
-  # are asked to confirm they are on it. Runs after publish, so a failed or
-  # dry run never advertises a version nobody can download. Commits to main,
-  # not the tag: a tag can be cut from an older commit and the form must
-  # follow main.
-  issue-template:
-    name: Bump bug report version
-    needs: [verify, publish]
-    if: github.ref_type == 'tag' && !inputs.dry_run
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
+      - name: Create GitHub Release and Upload APK
+        uses: softprops/action-gh-release@v2
         with:
-          ref: main
-
-      - name: Rewrite and push
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.title }}
+          body_path: release_notes.md
+          files: wmkeyboard-*.apk
+          draft: false
+          prerelease: ${{ github.event.inputs.prerelease || false }}
         env:
-          VERSION: ${{ needs.verify.outputs.version }}
-        run: |
-          file=.github/ISSUE_TEMPLATE/bug_report.yml
-          old=$(sed -n 's/^# latest-version: //p' "$file")
-          if [ -z "$old" ]; then
-            echo "::error::$file has no '# latest-version:' line"
-            exit 1
-          fi
-          if [ "$old" = "$VERSION" ]; then
-            echo "Bug report already names $VERSION"
-            exit 0
-          fi
-          # Dots escaped so 0.5.9 does not also match 0x5y9.
-          pattern=$(printf '%s' "$old" | sed 's/\./\\./g')
-          sed -i "s/$pattern/$VERSION/g" "$file"
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add "$file"
-          git commit -m "chore(issues): bug report asks for $VERSION"
-          # main may move while the release builds; rebase and retry.
-          for attempt in 1 2 3; do
-            git pull --rebase origin main && git push origin HEAD:main && exit 0
-            sleep 5
-          done
-          echo "::error::Could not push the bug report bump to main"
-          exit 1
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
