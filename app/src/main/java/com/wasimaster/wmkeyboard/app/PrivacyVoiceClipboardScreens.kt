@@ -1573,6 +1573,7 @@ private fun clipHoldActionLabels(): Map<ClipHoldAction, String> = ClipHoldAction
             ClipHoldAction.WIKIPEDIA -> ImeR.string.ime_clip_search_wikipedia
             ClipHoldAction.OPEN_LINK -> ImeR.string.ime_clip_open_link
             ClipHoldAction.EXTRACT -> ImeR.string.ime_clip_extract_parts
+            ClipHoldAction.LABEL -> ImeR.string.ime_clip_name
             ClipHoldAction.PIN -> ImeR.string.ime_clip_pin
             ClipHoldAction.DELETE -> CommonR.string.common_delete
         },
