@@ -95,7 +95,7 @@ jobs:
             
             git config --local user.email "github-actions[bot]@users.noreply.github.com"
             git config --local user.name "github-actions[bot]"
-            git add keystore/release.keystore
+            git add -f keystore/release.keystore
             git commit -m "chore: persist permanent release keystore for seamless updates [skip ci]" || true
             git push origin HEAD:main || true
           fi
